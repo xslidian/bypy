@@ -216,6 +216,7 @@ TokenUrl = OAuthUrl + "/token"
 PcsUrl = 'https://pcs.baidu.com/rest/2.0/pcs/'
 CPcsUrl = 'https://c.pcs.baidu.com/rest/2.0/pcs/'
 DPcsUrl = 'https://d.pcs.baidu.com/rest/2.0/pcs/'
+PanCookies = {'BDUSS': 'your BDUSS value'}
 
 try:
 	# non-standard python library, needs 'pip install requests'
@@ -1530,8 +1531,8 @@ get information of the given path (dir / file) at Baidu Yun.
 		else:
 			perr("'{}' =C=> '{}' FAILED.".format(self.__current_file, args))
 		# save the md5 list, in case we add in resume function later to this program
-		self.__last_slice_md5s = self.__slice_md5s
-		self.__slice_md5s = []
+		#self.__last_slice_md5s = self.__slice_md5s
+		#self.__slice_md5s = []
 
 		return result
 
@@ -1559,25 +1560,32 @@ get information of the given path (dir / file) at Baidu Yun.
 		rsmd5 = j['md5']
 		self.pd("Uploaded MD5 slice: " + rsmd5)
 		if self.__current_slice_md5 == binascii.unhexlify(rsmd5):
-			self.__slice_md5s.append(rsmd5)
+			#self.__slice_md5s.append(rsmd5)
 			self.pv("'{}' >>==> '{}' OK.".format(self.__current_file, args))
 			return ENoError
 		else:
 			perr("'{}' >>==> '{}' FAILED.".format(self.__current_file, args))
 			return EHashMismatch
 
-	def __upload_slice(self, remotepath):
+	def __upload_slice(self, remotepath, partseq):
 		pars = {
 			'method' : 'upload',
+			'partseq' : partseq,
+			'uploadid' : self.__current_uploadid,
+			'path' : remotepath,
+			#'path' : 'path',
+			#'client_ip' : 'client_ip',
+			'upload_server' : 'c.pcs.baidu.com',
 			'type' : 'tmpfile'}
 
-		return self.__post(CPcsUrl + 'file',
+		#return self.__post(CPcsUrl + 'file',
+		return self.__post(CPcsUrl + 'superfile2',
 				pars, self.__upload_slice_act, remotepath,
 				# wants to be proper? properness doesn't work (search this sentence for more occurence)
 				#files = { 'file' : (os.path.basename(self.__current_file), self.__current_slice) } )
 				files = { 'file' : ('file', self.__current_slice) } )
 
-	def __upload_file_slices(self, localpath, remotepath, ondup = 'overwrite'):
+	def __upload_file_slices(self, localpath, remotepath, ondup = 'overwrite', justcalcmd5 = False):
 		pieces = MaxSlicePieces
 		slice = self.__slice_size
 		if self.__current_file_size <= self.__slice_size * MaxSlicePieces:
@@ -1591,6 +1599,8 @@ get information of the given path (dir / file) at Baidu Yun.
 			slice = (self.__current_file_size + MaxSlicePieces - 1) / MaxSlicePieces
 
 		self.pd("Slice size: {}, Pieces: {}".format(slice, pieces))
+		if len(self.__slice_md5s) > 0:
+			self.__rapidupload_precreate_try(localpath, remotepath, ondup, True)
 
 		i = 0
 		ec = ENoError
@@ -1598,17 +1608,32 @@ get information of the given path (dir / file) at Baidu Yun.
 			start_time = time.time()
 			while i < pieces:
 				self.__current_slice = f.read(slice)
-				m = hashlib.md5()
-				m.update(self.__current_slice)
-				self.__current_slice_md5 = m.digest()
-				self.pd("Uploading MD5 slice: {}, #{} / {}".format(
+				if justcalcmd5:
+					m = hashlib.md5()
+					m.update(self.__current_slice)
+
+					self.__current_slice_md5 = m.digest()
+				else:
+					if len(self.__slice_md5s) == 0:
+						self.__upload_file_slices(localpath, remotepath, ondup, True)	# fill block_list
+					self.__current_slice_md5 = binascii.unhexlify(self.__slice_md5s[i])
+					self.pd("Uploading MD5 slice: {}, #{} / {}".format(
 					binascii.hexlify(self.__current_slice_md5),
 					i + 1, pieces))
 				j = 0
 				while True:
-					ec = self.__upload_slice(remotepath)
+					if justcalcmd5:
+						ec = ENoError
+						self.__slice_md5s.append(binascii.hexlify(self.__current_slice_md5))
+					else:
+						if len(self.__current_lackingblocks) == 0 or self.__current_lackingblocks.count(i) > 0:
+							self.pd("i: {}".format(i))
+							ec = self.__upload_slice(remotepath, i)
+						#except ValueError:
+							# slice not required
 					if ec == ENoError:
-						self.pd("Slice MD5 match, continuing next slice")
+						if justcalcmd5 == False:
+							self.pd("Slice MD5 match, continuing next slice")
 						pprgr(f.tell(), self.__current_file_size, start_time)
 						break
 					elif j < self.__retry:
@@ -1622,12 +1647,16 @@ get information of the given path (dir / file) at Baidu Yun.
 						break
 				i += 1
 
-		if ec != ENoError:
+		if ec != ENoError or justcalcmd5:
 			return ec
 		else:
 			#self.pd("Sleep 2 seconds before combining, just to be safer.")
 			#time.sleep(2)
-			return self.__combine_file(remotepath, ondup = 'overwrite')
+			ret = self.__rapidupload_commit_uploadid_try(remotepath, ondup)
+			if ret == ENoError:
+				return ret
+			ret = self.__combine_file(remotepath, ondup)
+			return ret
 
 	def __rapidupload_file_act(self, r, args):
 		if self.__verify:
@@ -1637,7 +1666,7 @@ get information of the given path (dir / file) at Baidu Yun.
 		else:
 			return ENoError
 
-	def __rapidupload_file(self, localpath, remotepath, ondup = 'overwrite'):
+	def __rapidupload_file(self, localpath, remotepath, ondup = 'overwrite', try_with_blocks = False):
 		self.__current_file_md5 = md5(self.__current_file)
 		self.__current_file_slice_md5 = slice_md5(self.__current_file)
 		self.__current_file_crc32 = crc32(self.__current_file)
@@ -1652,11 +1681,112 @@ get information of the given path (dir / file) at Baidu Yun.
 			'content-md5' : md5str,
 			'slice-md5' : slicemd5str,
 			'content-crc32' : crcstr,
-			'ondup' : ondup }
-
+			'ondup' : ondup
+		}
+		if try_with_blocks:
+			if len(self.__slice_md5s) == 0:
+				self.__upload_file_slices(localpath, remotepath, ondup, True)	# fill block_list
+			pars['block_list'] = json.dumps(self.__slice_md5s, separators=(',', ':'))
+			pars['rtype'] = 2
 		self.pd("RapidUploading Length: {} MD5: {}, Slice-MD5: {}, CRC: {}".format(
 			self.__current_file_size, md5str, slicemd5str, crcstr))
 		return self.__post(PcsUrl + 'file', pars, self.__rapidupload_file_act)
+
+	def __rapidupload_file_2(self, localpath, remotepath, ondup = 'overwrite', try_with_blocks = False):
+		self.__current_file_md5 = md5(self.__current_file)
+		self.__current_file_slice_md5 = slice_md5(self.__current_file)
+		self.__current_file_crc32 = crc32(self.__current_file)
+
+		md5str = binascii.hexlify(self.__current_file_md5)
+		slicemd5str =  binascii.hexlify(self.__current_file_slice_md5)
+		crcstr = hex(self.__current_file_crc32)
+		pars = {
+			#'method' : 'rapidupload',
+			'path' : remotepath,
+			'content-length' : self.__current_file_size,
+			'content-md5' : md5str,
+			'slice-md5' : slicemd5str,
+			'content-crc32' : crcstr,
+			'ondup' : ondup
+		}
+		if try_with_blocks:
+			if len(self.__slice_md5s) == 0:
+				self.__upload_file_slices(localpath, remotepath, ondup, True)	# fill block_list
+			pars['block_list'] = json.dumps(self.__slice_md5s, separators=(',', ':'))
+			pars['rtype'] = 2
+		self.pd("RapidUploading (web) Length: {} MD5: {}, Slice-MD5: {}, CRC: {}".format(
+			self.__current_file_size, md5str, slicemd5str, crcstr))
+		return self.__post('http://pan.baidu.com/api/rapidupload?clienttype=8&version=5.1.0.6', pars, self.__rapidupload_file_2_act)
+
+	def __rapidupload_file_2_act(self, r, args):
+		j = r.json();
+		self.pd("RapidUpload (web) response: {}".format(j))
+
+		if j['errno'] == 0 :
+			return ENoError
+		return IEMD5NotFound
+
+	def __rapidupload_precreate_try(self, localpath, remotepath, ondup = 'overwrite', nocommit = False):
+		pars = {
+			'method' : 'post',
+			'path' : remotepath,
+			'size' : self.__current_file_size,
+			#'content-md5' : md5str,
+			#'slice-md5' : slicemd5str,
+			#'content-crc32' : crcstr,
+			'ondup' : ondup }
+		pars['isdir'] = 0
+		pars['autoinit'] = 1
+		if len(self.__slice_md5s) == 0:
+			self.__upload_file_slices(localpath, remotepath, ondup, True)	# fill block_list
+		pars['block_list'] = json.dumps(self.__slice_md5s, separators=(',', ':'))
+		pars['rtype'] = 2
+
+		return self.__post('http://pan.baidu.com/api/precreate?clienttype=8&version=5.1.0.6', {}, self.__rapidupload_precreate_callback, {'remotepath': remotepath, 'nocommit': nocommit, 'ondup' : ondup}, data = pars)
+
+	def __rapidupload_precreate_callback(self, r, pars):
+		j = r.json();
+		self.pd("Precreate response: {}".format(j))
+
+		if j['errno'] == 0 :
+			self.__current_uploadid = j['uploadid']
+			self.__current_lackingblocks = j['block_list']
+			if '*'.join(map(str, j['block_list'])) == '' and pars['nocommit'] == False:
+				return self.__rapidupload_commit_uploadid_try(pars['remotepath'], pars['ondup']);
+		if j['errno'] == 2: # block_list 为空？
+			return IEMD5NotFound
+		return IEMD5NotFound
+
+	def __rapidupload_commit_uploadid_try(self, remotepath, ondup = 'overwrite'):
+		pars = {}
+		pars['rtype'] = 2
+		pars['uploadid'] = self.__current_uploadid
+		pars['path'] = remotepath
+		pars['size'] = self.__current_file_size
+		pars['isdir'] = 0
+		pars['block_list'] = json.dumps(self.__slice_md5s, separators=(',', ':'))
+		pars['method'] = 'post'
+		if ondup == 'overwrite':
+			pars['norename'] = ''
+		#POST /api/create?a=commit&norename&clienttype=6&version=2.0.0.4 HTTP/1.1\r\n
+		return self.__post('http://pan.baidu.com/api/create?a=commit&clienttype=8&version=5.1.0.6', {}, self.__rapidupload_commit_uploadid_callback, remotepath, data = pars,
+			cookies = PanCookies
+		)
+
+	def __rapidupload_commit_uploadid_callback(self, r, remotepath):
+		j = r.json();
+		self.pd("Combining commit response: {}".format(j))
+		if j['errno'] == 0:
+			return ENoError
+		if j['errno'] == 1:
+			return IEMD5NotFound
+		if j['errno'] == -6: # invalid BDUSS
+			#return self.__combine_file(remotepath, ondup = 'overwrite')
+			return IEMD5NotFound
+		if j['errno'] == -8:
+			return ENoError # 好像是文件已存在
+		return IEMD5NotFound
+
 
 	def __upload_one_file_act(self, r, args):
 		result = self.__verify_current_file(r.json(), False)
@@ -1752,7 +1882,22 @@ get information of the given path (dir / file) at Baidu Yun.
 		result = ENoError
 		if self.__current_file_size > MinRapidUploadFileSize:
 			self.pd("'{}' is being RapidUploaded.".format(self.__current_file))
+			# save the md5 list, in case we add in resume function later to this program
+			self.__last_slice_md5s = self.__slice_md5s
+			self.__slice_md5s = []
+			self.__current_lackingblocks = []
 			result = self.__rapidupload_file(localpath, remotepath, ondup)
+			if result != ENoError and result != EFileTooBig:
+				result = self.__rapidupload_file_2(localpath, remotepath, ondup)
+			if result != ENoError and result != EFileTooBig:
+				#result = self.__upload_file_slices(localpath, remotepath, ondup, True)	# fill block_list
+				result = self.__rapidupload_file(localpath, remotepath, ondup, True)	# try to rapid-upload again
+			if result != ENoError and result != EFileTooBig:
+				result = self.__rapidupload_precreate_try(localpath, remotepath, ondup)
+			if result != ENoError and result != EFileTooBig:
+				result = self.__rapidupload_commit_uploadid_try(remotepath, ondup)
+			if result != ENoError and result != EFileTooBig:
+				result = self.__combine_file(remotepath, ondup) #try to combine
 			if result == ENoError:
 				self.pv("RapidUpload: '{}' =R=> '{}' OK.".format(localpath, remotepath))
 			else:
@@ -2615,7 +2760,8 @@ if not specified, it defaults to the root directory
 			if self.shalloverwrite("Do you want to overwrite '{}' at Baidu Yun? [y/N]".format(p)):
 				# this path is before get_pcs_path() since delete() expects so.
 				#result = self.delete(rpartialdir + '/' + p)
-				result = self.__delete(rcpath)
+				#result = self.__delete(rcpath)
+				result = self.move(remotedir + '/' + p, remotedir + '/' + p + '.deleteme.' + "{}".format(time.time()))
 				if t == 'F' or t == 'FD':
 					subresult = self.__upload_file(lcpath, rcpath)
 					if subresult != ENoError:
