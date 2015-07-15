@@ -1412,7 +1412,7 @@ class ByPy(object):
 		kwnew = kwargs.copy()
 		if 'headers' not in kwnew:
 			kwnew['headers'] = { 'User-Agent': UserAgent }
-		else:
+		if 'User-Agent' not in kwnew['headers']:
 			kwnew['headers']['User-Agent'] = UserAgent
 
 		while True:
@@ -2410,6 +2410,9 @@ try to create a file at PCS by combining slices, having MD5s specified
 
 		pars = {
 			'method' : 'download',
+			'app_id': 250528,
+			'check_blue' : '1',
+			'ec' : '1',
 			'path' : rfile }
 
 		offset = start
@@ -2435,8 +2438,12 @@ try to create a file at PCS by combining slices, having MD5s specified
 				self.pd("headers['Range'][6:]: {} {}".format(headers['Range'][6:], base64.standard_b64encode(headers['Range'][6:])))
 				pars['ru'] = base64.standard_b64encode(headers['Range'][6:])
 
+			headers['User-Agent'] = 'netdisk;5.2.7.2;PC;PC-Windows;6.2.9200;WindowsBaiduYunGuanJia'
+
+			self.pd("headers2: {}".format(headers))
+
 			subresult = self.__get(dpcsurl + 'file', pars,
-				self.__downchunks_act, (rfile, offset, rsize, start_time), headers = headers)
+				self.__downchunks_act, (rfile, offset, rsize, start_time), headers = headers, cookies = self.__pancookies)
 			if subresult != ENoError:
 				return subresult
 
